@@ -41,29 +41,47 @@ export default function DashboardPage() {
     async function load() {
       setLoading(true);
 
-      const [vehRes, ordRes] = await Promise.all([
+      // 1. Fetch vehicles, orders, and assigned_orders simultaneously
+      const [vehRes, ordRes, assignedRes] = await Promise.all([
         supabase.from("vehicles").select("*"),
         supabase.from("orders").select(`
             id,
             order_code,
             status,
-            vehicle_id,
             weight_kg,
             volume_m3,
             outlets ( brand, district )
           `),
+        supabase.from("assigned_orders").select("*"),
       ]);
 
       if (vehRes.error) console.error("Supabase vehicles fetch error:", vehRes.error);
       if (ordRes.error) console.error("Supabase orders fetch error:", ordRes.error);
+      if (assignedRes.error) console.warn("Supabase assigned_orders fetch warning:", assignedRes.error);
 
+      // 2. Map assigned_orders (order_id -> vehicle_id)
+      const assignedMap = new Map<string, { vehicleId: string; status: string }>();
+      (assignedRes.data ?? []).forEach((a: any) => {
+        if (a.order_id && a.vehicle_id) {
+          assignedMap.set(String(a.order_id), {
+            vehicleId: String(a.vehicle_id),
+            status: a.status || "assigned",
+          });
+        }
+      });
+
+      // 3. Process orders and link assigned vehicle IDs
       const loadedOrders: OrderRow[] = (ordRes.data ?? []).map((o: any) => {
         const outlet = Array.isArray(o.outlets) ? o.outlets[0] ?? {} : o.outlets ?? {};
+        const assignment = assignedMap.get(String(o.id));
+        const mappedVehicleId = assignment?.vehicleId || null;
+        const currentStatus = assignment ? assignment.status : o.status;
+
         return {
-          id: o.id,
+          id: String(o.id),
           orderCode: o.order_code,
-          vehicleId: o.vehicle_id,
-          status: o.status,
+          vehicleId: mappedVehicleId,
+          status: currentStatus as OrderRow["status"],
           weightKg: Number(o.weight_kg) || 0,
           volumeM3: Number(o.volume_m3) || 0,
           outletLabel: `${outlet.brand ?? "Outlet"}${outlet.district ? " · " + outlet.district : ""}`,
@@ -72,14 +90,13 @@ export default function DashboardPage() {
 
       setOrders(loadedOrders);
 
-      // Vehicles load එක DB හි static අගයට වඩා assigned orders වලින් dynamically ගණනය කිරීම
+      // 4. Calculate vehicle load and routes dynamically from assigned orders
       setVehicles(
         (vehRes.data ?? []).map((v: any) => {
-          const vId = v.vehicle_id || v.id;
-          
-          // Assign වූ orders එකතු කර බර සහ පරිමාව ගණනය කිරීම
+          const vId = String(v.vehicle_id || v.id);
+
           const assignedToVehicle = loadedOrders.filter(
-            (o) => o.vehicleId === vId && o.status === "assigned"
+            (o) => o.vehicleId === vId && (o.status === "assigned" || o.status === "delivered")
           );
 
           const calcUsedKg = assignedToVehicle.reduce((acc, curr) => acc + curr.weightKg, 0);
@@ -91,8 +108,8 @@ export default function DashboardPage() {
             refrigerated: v.temp === "reefer" || v.temp === "Chilled",
             weightCapKg: Number(v.weight_cap_kg) || 3000,
             volumeCapM3: Number(v.volume_cap_m3) || 14,
-            usedKg: calcUsedKg > 0 ? calcUsedKg : (v.used_weight_kg || 0),
-            usedM3: calcUsedM3 > 0 ? calcUsedM3 : (v.used_volume_m3 || 0),
+            usedKg: calcUsedKg > 0 ? calcUsedKg : Number(v.used_weight_kg) || 0,
+            usedM3: calcUsedM3 > 0 ? calcUsedM3 : Number(v.used_volume_m3) || 0,
             fuelQuotaPctLeft: v.fuel_percent ?? 100,
             routesToday: v.routes_today ?? (assignedToVehicle.length > 0 ? 1 : 0),
           };
@@ -117,7 +134,7 @@ export default function DashboardPage() {
   const routesByVehicle = useMemo(() => {
     const byVehicle = new Map<string, OrderRow[]>();
     orders
-      .filter((o) => o.status === "assigned" && o.vehicleId)
+      .filter((o) => (o.status === "assigned" || o.status === "delivered") && o.vehicleId)
       .forEach((o) => {
         const list = byVehicle.get(o.vehicleId!) ?? [];
         list.push(o);
@@ -126,12 +143,14 @@ export default function DashboardPage() {
 
     return Array.from(byVehicle.entries()).map(([vehicleId, vOrders]) => {
       const vehicle = vehicles.find((v) => v.id === vehicleId);
+      const isDelivered = vOrders.every((o) => o.status === "delivered");
+
       return {
         vehicleId,
         vehicleType: vehicle?.typeLabel ?? "Vehicle",
         stopsCount: vOrders.length,
         nextStop: vOrders[0]?.outletLabel ?? "—",
-        status: "onPlan" as RouteStatus,
+        status: (isDelivered ? "delivered" : "onPlan") as RouteStatus,
       };
     });
   }, [orders, vehicles]);
@@ -140,8 +159,9 @@ export default function DashboardPage() {
 
   const visibleRows = routesByVehicle.filter((r) => {
     if (filter === "all") return true;
-    if (filter === "attention") return false;
-    return false;
+    if (filter === "attention") return r.status === "late" || r.status === "deferred";
+    if (filter === "delivered") return r.status === "delivered";
+    return true;
   });
 
   if (loading) {
@@ -181,40 +201,7 @@ export default function DashboardPage() {
         <Kpi label="Delivered" value={counts.delivered} color="var(--g700)" />
       </div>
 
-      <section className="card">
-        <h2 style={{ marginTop: 0 }}>Fleet status</h2>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                {["Vehicle", "Type", "Load", "Fuel quota", "Routes today"].map((h) => (
-                  <Th key={h}>{h}</Th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {vehicles.map((v) => {
-                const wtPct = v.weightCapKg ? Math.min(100, Math.round((v.usedKg / v.weightCapKg) * 100)) : 0;
-                const volPct = v.volumeCapM3 ? Math.min(100, Math.round((v.usedM3 / v.volumeCapM3) * 100)) : 0;
-                return (
-                  <tr key={v.id}>
-                    <Td><b>{v.id}</b></Td>
-                    <Td><Tag variant={v.refrigerated ? "chill" : undefined}>{v.typeLabel}</Tag></Td>
-                    <Td><Bar pct={wtPct} /> {wtPct}% wt · {volPct}% vol</Td>
-                    <Td><Bar pct={100 - v.fuelQuotaPctLeft} warnAbove={85} /> {100 - v.fuelQuotaPctLeft}% used</Td>
-                    <Td>{v.routesToday} of 2</Td>
-                  </tr>
-                );
-              })}
-              {vehicles.length === 0 && (
-                <tr><Td colSpan={5}>No vehicles found in Supabase.</Td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="card">
+       <section className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
           <h2 style={{ marginTop: 0 }}>Today&rsquo;s routes</h2>
           <div style={{ display: "flex", gap: 6 }}>
@@ -248,7 +235,7 @@ export default function DashboardPage() {
             </thead>
             <tbody>
               {visibleRows.length === 0 && (
-                <tr><Td colSpan={5}>No assigned routes yet — allocate some orders first.</Td></tr>
+                <tr><Td colSpan={5}>No assigned routes found for this filter.</Td></tr>
               )}
               {visibleRows.map((r) => (
                 <tr key={r.vehicleId}>
@@ -268,6 +255,41 @@ export default function DashboardPage() {
         </div>
       </section>
 
+      <section className="card">
+        <h2 style={{ marginTop: 0 }}>Fleet status</h2>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {["Vehicle", "Type", "Load", "Fuel quota", "Routes today"].map((h) => (
+                  <Th key={h}>{h}</Th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {vehicles.map((v) => {
+                const wtPct = v.weightCapKg ? Math.min(100, Math.round((v.usedKg / v.weightCapKg) * 100)) : 0;
+                const volPct = v.volumeCapM3 ? Math.min(100, Math.round((v.usedM3 / v.volumeCapM3) * 100)) : 0;
+                return (
+                  <tr key={v.id}>
+                    <Td><b>{v.id}</b></Td>
+                    <Td><Tag variant={v.refrigerated ? "chill" : undefined}>{v.typeLabel}</Tag></Td>
+                    <Td><Bar pct={wtPct} /> {wtPct}% wt · {volPct}% vol</Td>
+                    <Td><Bar pct={100 - v.fuelQuotaPctLeft} warnAbove={85} /> {100 - v.fuelQuotaPctLeft}% used</Td>
+                    <Td>{v.routesToday} of 2</Td>
+                  </tr>
+                );
+              })}
+              {vehicles.length === 0 && (
+                <tr><Td colSpan={5}>No vehicles found in Supabase.</Td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+     
+
       <style>{`.card{background:var(--white);border:1px solid var(--g300);border-radius:12px;padding:16px;margin-bottom:16px}`}</style>
     </div>
   );
@@ -281,9 +303,11 @@ function Kpi({ label, value, color }: { label: string; value: number; color?: st
     </div>
   );
 }
+
 function Th({ children }: { children: React.ReactNode }) {
   return <th style={{ textAlign: "left", fontSize: 12, textTransform: "uppercase", color: "var(--g600)", padding: "8px 12px", borderBottom: "1px solid var(--g300)", whiteSpace: "nowrap" }}>{children}</th>;
 }
+
 function Td({ children, colSpan }: { children: React.ReactNode; colSpan?: number }) {
   return <td colSpan={colSpan} style={{ padding: "11px 12px", borderBottom: "1px solid var(--g200)", fontSize: 14, verticalAlign: "top" }}>{children}</td>;
 }

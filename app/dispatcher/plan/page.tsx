@@ -256,25 +256,53 @@ export default function AllocatePage() {
     try {
       setMessage("Updating database...");
 
-      // Update in Supabase by matching primary key dbId or order_code
-      let query = supabase.from("orders").update({
-        status: "assigned",
-        vehicle_id: selectedVehicle.id,
-      });
+try {
+  setMessage("Updating database...");
 
-      if (selectedOrder.dbId) {
-        query = query.eq("id", selectedOrder.dbId);
-      } else {
-        query = query.eq("order_code", selectedOrder.id);
-      }
+        // 1. Insert into assigned_orders table
+        const { error: insertError } = await supabase
+          .from("assigned_orders") // Fixed spelling
+          .upsert(
+    {
+      order_id: selectedOrder.dbId || selectedOrder.id,
+      vehicle_id: selectedVehicle.id,
+      status: "assigned",
+      assigned_at: new Date().toISOString(),
+    },
+  { onConflict: "order_id,vehicle_id" }
+  )
 
-      const { data, error } = await query.select();
+        if (insertError) {
+          console.error("Supabase Insert Error:", insertError);
+          alert(`Insert failed: ${insertError.message}`);
+          setMessage(`Error: ${insertError.message}`);
+          return;
+        }
 
-      if (error) {
-        console.error("Supabase Error:", error);
-        alert(`Update failed: ${error.message}`);
-        setMessage(`Error: ${error.message}`);
-        return;
+        // 2. Update status in orders table
+        let updateQuery = supabase
+          .from("orders")
+          .update({ status: "assigned" });
+
+        if (selectedOrder.dbId) {
+          updateQuery = updateQuery.eq("id", selectedOrder.dbId);
+        } else {
+          updateQuery = updateQuery.eq("order_code", selectedOrder.id);
+        }
+
+        const { error: updateError } = await updateQuery;
+
+        if (updateError) {
+          console.error("Supabase Update Error:", updateError);
+          alert(`Update failed: ${updateError.message}`);
+          setMessage(`Error: ${updateError.message}`);
+          return;
+        }
+
+        // Local state updates...
+      } catch (err: any) {
+        console.error("Assign error:", err);
+        setMessage(`Unexpected error: ${err.message}`);
       }
 
       // Local state update
@@ -299,86 +327,101 @@ export default function AllocatePage() {
     }
   }
 
-  async function handleAutoAllocate() {
-    setIsAllocating(true);
-    setMessage("Calculating road distances via OSRM...");
+async function handleAutoAllocate() {
+  setIsAllocating(true);
+  setMessage("Calculating road distances via OSRM...");
 
-    let assignedCount = 0;
-    const autoDeferred: string[] = [];
-    let currentVehicles = [...vehicles];
-    const remainingOrders: OrderItem[] = [];
+  let assignedCount = 0;
+  const autoDeferred: string[] = [];
+  let currentVehicles = [...vehicles];
+  const remainingOrders: OrderItem[] = [];
 
-    for (const o of orders) {
-      const validCandidates: { index: number; drivingDist: number }[] = [];
-      const failureReasons: string[] = [];
+  for (const o of orders) {
+    const validCandidates: { index: number; drivingDist: number }[] = [];
+    const failureReasons: string[] = [];
 
-      for (let j = 0; j < currentVehicles.length; j++) {
-        const v = currentVehicles[j];
-        const c = evalRules(o, v);
+    for (let j = 0; j < currentVehicles.length; j++) {
+      const v = currentVehicles[j];
+      const c = evalRules(o, v);
 
-        if (c.every((x) => x[0])) {
-          const drivingDist = await getOSRMDrivingDistance(v.anchor, {
-            lat: o.lat,
-            lng: o.lng,
-          });
-          validCandidates.push({ index: j, drivingDist });
-        } else {
-          const failed = c.filter((x) => !x[0]).map((x) => x[2]);
-          failureReasons.push(`${v.id}: ${failed.join(", ")}`);
-        }
-      }
-
-      if (validCandidates.length > 0) {
-        validCandidates.sort((a, b) => a.drivingDist - b.drivingDist);
-        const bestIdx = validCandidates[0].index;
-        const v = currentVehicles[bestIdx];
-
-        if (o.dbId) {
-          const { error } = await supabase
-            .from("orders")
-            .update({
-              vehicle_id: v.id,
-              status: "assigned",
-            })
-            .eq("id", o.dbId);
-          if (error) console.error(`Supabase assign error for ${o.id}:`, error);
-        }
-
-        currentVehicles[bestIdx] = {
-          ...v,
-          u: v.u + o.kg,
-          uv: v.uv + o.m3,
-          anchor: { lat: o.lat, lng: o.lng },
-        };
-        assignedCount++;
-      } else {
-        if (o.dbId) {
-          const { error } = await supabase
-            .from("orders")
-            .update({ status: "deferred" })
-            .eq("id", o.dbId);
-          if (error) console.error(`Supabase defer error for ${o.id}:`, error);
-        }
-        autoDeferred.push(`${o.id} (${o.o})`);
-        remainingOrders.push({
-          ...o,
-          unassignableReason: failureReasons.join(" | "),
+      if (c.every((x) => x[0])) {
+        const drivingDist = await getOSRMDrivingDistance(v.anchor, {
+          lat: o.lat,
+          lng: o.lng,
         });
+        validCandidates.push({ index: j, drivingDist });
+      } else {
+        const failed = c.filter((x) => !x[0]).map((x) => x[2]);
+        failureReasons.push(`${v.id}: ${failed.join(", ")}`);
       }
     }
 
-    setOrders(remainingOrders);
-    setVehicles(currentVehicles);
-    setSo(null);
-    setSv(null);
-    setIsAllocating(false);
+    if (validCandidates.length > 0) {
+      validCandidates.sort((a, b) => a.drivingDist - b.drivingDist);
+      const bestIdx = validCandidates[0].index;
+      const v = currentVehicles[bestIdx];
 
-    if (autoDeferred.length > 0) {
-      setMessage(`Assigned ${assignedCount} orders. ${autoDeferred.length} deferred.`);
+      // 1. Insert into assigned_orders table
+      const { error: insertError } = await supabase
+        .from("assigned_orders")
+        .insert({
+          order_id: o.dbId || o.id,
+          vehicle_id: v.id,
+          status: "assigned",
+        });
+
+      if (insertError) {
+        console.error(`Supabase insert error for ${o.id}:`, insertError);
+      }
+
+      // 2. Update order status in orders table
+      if (o.dbId) {
+        const { error: updateError } = await supabase
+          .from("orders")
+          .update({
+            status: "assigned",
+          })
+          .eq("id", o.dbId);
+
+        if (updateError) console.error(`Supabase assign error for ${o.id}:`, updateError);
+      }
+
+      currentVehicles[bestIdx] = {
+        ...v,
+        u: v.u + o.kg,
+        uv: v.uv + o.m3,
+        anchor: { lat: o.lat, lng: o.lng },
+      };
+      assignedCount++;
     } else {
-      setMessage(`Auto-allocation complete: All ${assignedCount} orders assigned!`);
+      if (o.dbId) {
+        const { error } = await supabase
+          .from("orders")
+          .update({ status: "deferred" })
+          .eq("id", o.dbId);
+
+        if (error) console.error(`Supabase defer error for ${o.id}:`, error);
+      }
+      autoDeferred.push(`${o.id} (${o.o})`);
+      remainingOrders.push({
+        ...o,
+        unassignableReason: failureReasons.join(" | "),
+      });
     }
   }
+
+  setOrders(remainingOrders);
+  setVehicles(currentVehicles);
+  setSo(null);
+  setSv(null);
+  setIsAllocating(false);
+
+  if (autoDeferred.length > 0) {
+    setMessage(`Assigned ${assignedCount} orders. ${autoDeferred.length} deferred.`);
+  } else {
+    setMessage(`Auto-allocation complete: All ${assignedCount} orders assigned!`);
+  }
+}
 
   if (loading) {
     return (

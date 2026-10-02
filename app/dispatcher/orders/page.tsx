@@ -1,15 +1,93 @@
-// app/dispatcher/orders/page.tsx
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ORDERS } from "@/lib/dispatcher/data";
+import { supabase } from "@/lib/supabase/client";
 import { Tag } from "@/components/dispatcher/ui";
 
+interface OrderItem {
+  id: string;
+  orderCode: string;
+  outletId: string;
+  outletName: string;
+  vanOnly: boolean;
+  tempClass: "Chilled" | "Ambient";
+  weightKg: number;
+  volumeM3: number;
+  window: string;
+  pastCutoff: boolean;
+  status: string;
+}
+
 export default function OrdersPage() {
+  const [orders, setOrders] = useState<OrderItem[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<string>("All");
 
-  const filteredOrders = ORDERS.filter((o) => {
+  useEffect(() => {
+    async function fetchOrders() {
+      setLoading(true);
+
+      // Fetching only guaranteed columns from orders table
+      const [ordRes, assignedRes] = await Promise.all([
+        supabase.from("orders").select(`
+          id,
+          order_code,
+          weight_kg,
+          volume_m3,
+          status,
+          outlets ( brand, district )
+        `),
+        supabase.from("assigned_orders").select("order_id, status"),
+      ]);
+
+      if (ordRes.error) {
+        console.error(
+          "Supabase orders error:",
+          ordRes.error.message,
+          ordRes.error.details,
+          ordRes.error.hint
+        );
+        setLoading(false);
+        return;
+      }
+
+      // Map assigned_orders statuses
+      const assignedMap = new Map<string, string>();
+      (assignedRes.data ?? []).forEach((a: any) => {
+        if (a.order_id) {
+          assignedMap.set(String(a.order_id), a.status || "assigned");
+        }
+      });
+
+      const loadedOrders: OrderItem[] = (ordRes.data ?? []).map((o: any) => {
+        const outlet = Array.isArray(o.outlets) ? o.outlets[0] ?? {} : o.outlets ?? {};
+        const isAssigned = assignedMap.has(String(o.id));
+
+        return {
+          id: String(o.id),
+          orderCode: o.order_code || o.id,
+          outletId: outlet.outlet_id ? `[${outlet.outlet_id}]` : "",
+          outletName: `${outlet.brand ?? "Outlet"}${outlet.district ? " · " + outlet.district : ""}`,
+          vanOnly: Boolean(o.van_only ?? false),
+          // Fallback temperature class check (or update 'temp' if your DB column has a different name)
+          tempClass: (o.temp || o.temp_class || o.temperature) === "reefer" ? "Chilled" : "Ambient",
+          weightKg: Number(o.weight_kg) || 0,
+          volumeM3: Number(o.volume_m3) || 0,
+          window: o.time_window || "Standard",
+          pastCutoff: Boolean(o.past_cutoff ?? false),
+          status: isAssigned ? assignedMap.get(String(o.id))! : o.status,
+        };
+      });
+
+      setOrders(loadedOrders);
+      setLoading(false);
+    }
+
+    fetchOrders();
+  }, []);
+
+  const filteredOrders = orders.filter((o) => {
     if (activeTab === "Chilled") return o.tempClass === "Chilled";
     if (activeTab === "Ambient") return o.tempClass === "Ambient";
     if (activeTab === "Past cutoff") return o.pastCutoff;
@@ -18,7 +96,6 @@ export default function OrdersPage() {
 
   return (
     <div style={{ maxWidth: 1000, margin: "0 auto" }}>
-      {/* Page Title */}
       <h1
         style={{
           fontSize: 32,
@@ -31,39 +108,21 @@ export default function OrdersPage() {
         Order queue
       </h1>
 
-      {/* Status Filter Tabs / Tags */}
       <div className="tabs" style={{ display: "flex", gap: 6, marginBottom: 20 }}>
-        <span
-          className={`tag ${activeTab === "All" ? "on" : ""}`}
-          onClick={() => setActiveTab("All")}
-          style={{ cursor: "pointer" }}
-        >
-          All
-        </span>
-        <span
-          className={`tag c ${activeTab === "Chilled" ? "on" : ""}`}
-          onClick={() => setActiveTab("Chilled")}
-          style={{ cursor: "pointer" }}
-        >
-          Chilled
-        </span>
-        <span
-          className={`tag ${activeTab === "Ambient" ? "on" : ""}`}
-          onClick={() => setActiveTab("Ambient")}
-          style={{ cursor: "pointer" }}
-        >
-          Ambient
-        </span>
-        <span
-          className={`tag w ${activeTab === "Past cutoff" ? "on" : ""}`}
-          onClick={() => setActiveTab("Past cutoff")}
-          style={{ cursor: "pointer" }}
-        >
-          Past cutoff
-        </span>
+        {(["All", "Chilled", "Ambient", "Past cutoff"] as const).map((tab) => (
+          <span
+            key={tab}
+            className={`tag ${tab === "Chilled" ? "c" : tab === "Past cutoff" ? "w" : ""} ${
+              activeTab === tab ? "on" : ""
+            }`}
+            onClick={() => setActiveTab(tab)}
+            style={{ cursor: "pointer" }}
+          >
+            {tab}
+          </span>
+        ))}
       </div>
 
-      {/* Table Container Card */}
       <div
         style={{
           background: "var(--white, #ffffff)",
@@ -74,13 +133,7 @@ export default function OrdersPage() {
         }}
       >
         <div style={{ overflowX: "auto" }}>
-          <table
-            style={{
-              width: "100%",
-              minWidth: 640,
-              borderCollapse: "collapse",
-            }}
-          >
+          <table style={{ width: "100%", minWidth: 640, borderCollapse: "collapse" }}>
             <thead>
               <tr>
                 {["Order", "Outlet", "Class", "Weight / volume", "Window", ""].map((h) => (
@@ -101,53 +154,67 @@ export default function OrdersPage() {
               </tr>
             </thead>
             <tbody>
-              {filteredOrders.map((o) => (
-                <tr key={o.id} style={o.pastCutoff ? { background: "var(--yellow-tint, #fefce8)" } : undefined}>
-                  <td style={cell}>
-                    <b>{o.id}</b>
-                  </td>
-                  <td style={cell}>
-                    {o.outletId} {o.outletName} {o.vanOnly && <Tag>Van only</Tag>}
-                  </td>
-                  <td style={cell}>
-                    <Tag variant={o.tempClass !== "Ambient" ? "chill" : undefined}>{o.tempClass}</Tag>
-                  </td>
-                  <td style={cell}>
-                    {o.weightKg} kg · {o.volumeM3} m³
-                  </td>
-                  <td style={cell}>{o.pastCutoff ? "Past cutoff" : o.window}</td>
-                  <td style={cell}>
-                    {!o.pastCutoff && (
-                      <Link
-                        href="/dispatcher/plan/"
-                        style={{
-                          fontSize: 13,
-                          border: "1px solid var(--g300, #e5e7eb)",
-                          borderRadius: 6,
-                          padding: "2px 8px",
-                          textDecoration: "none",
-                          color: "inherit",
-                          fontWeight: 600,
-                        }}
-                      >
-                        Allocate
-                      </Link>
-                    )}
+              {loading ? (
+                <tr>
+                  <td colSpan={6} style={{ ...cell, textAlign: "center", color: "var(--g600)" }}>
+                    Loading order queue…
                   </td>
                 </tr>
-              ))}
+              ) : filteredOrders.length === 0 ? (
+                <tr>
+                  <td colSpan={6} style={{ ...cell, textAlign: "center", color: "var(--g600)" }}>
+                    No orders found.
+                  </td>
+                </tr>
+              ) : (
+                filteredOrders.map((o) => (
+                  <tr key={o.id} style={o.pastCutoff ? { background: "var(--yellow-tint, #fefce8)" } : undefined}>
+                    <td style={cell}>
+                      <b>{o.orderCode}</b>
+                    </td>
+                    <td style={cell}>
+                      {o.outletId} {o.outletName} {o.vanOnly && <Tag>Van only</Tag>}
+                    </td>
+                    <td style={cell}>
+                      <Tag variant={o.tempClass !== "Ambient" ? "chill" : undefined}>{o.tempClass}</Tag>
+                    </td>
+                    <td style={cell}>
+                      {o.weightKg} kg · {o.volumeM3} m³
+                    </td>
+                    <td style={cell}>{o.pastCutoff ? "Past cutoff" : o.window}</td>
+                    <td style={cell}>
+                      {!o.pastCutoff && o.status !== "assigned" && (
+                        <Link
+                          href="/dispatcher/plan"
+                          style={{
+                            fontSize: 13,
+                            border: "1px solid var(--g300, #e5e7eb)",
+                            borderRadius: 6,
+                            padding: "2px 8px",
+                            textDecoration: "none",
+                            color: "inherit",
+                            fontWeight: 600,
+                          }}
+                        >
+                          Allocate
+                        </Link>
+                      )}
+                      {o.status === "assigned" && (
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "var(--green, #16a34a)" }}>
+                          Assigned
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
       </div>
 
       <style>{`
-        .tabs {
-          display: flex;
-          gap: 6px;
-          align-items: center;
-        }
-
+        .tabs { display: flex; gap: 6px; align-items: center; }
         .tag {
           display: inline-flex;
           align-items: center;
@@ -160,22 +227,9 @@ export default function OrdersPage() {
           border: 1px solid var(--g300, #e5e7eb);
           user-select: none;
         }
-
-        .tag.c {
-          background: #e0f2fe;
-          color: #0369a1;
-          border-color: #bae6fd;
-        }
-
-        .tag.w {
-          background: #fef2f2;
-          color: #b91c1c;
-          border-color: #fecaca;
-        }
-
-        .tag.on {
-          outline: 2px solid var(--ink, #111827);
-        }
+        .tag.c { background: #e0f2fe; color: #0369a1; border-color: #bae6fd; }
+        .tag.w { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+        .tag.on { outline: 2px solid var(--ink, #111827); }
       `}</style>
     </div>
   );
