@@ -119,7 +119,7 @@ export default function OrdersPage() {
                   <td style={cell}>
                     {!o.pastCutoff && (
                       <Link
-                        href="/dispatcher/allocate"
+                        href="/dispatcher/plan/"
                         style={{
                           fontSize: 13,
                           border: "1px solid var(--g300, #e5e7eb)",
