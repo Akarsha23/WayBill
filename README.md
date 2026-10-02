@@ -57,3 +57,49 @@ WayBill/
 ├── package.json         # Project dependencies and scripts
 
 └── README.md            # Project documentation
+
+
+# WayBill 🚚📦
+
+**WayBill** is an intelligent logistics, dispatch, and route optimization platform built for the **SLASSCOM Xcellerate Tech Triathlon 2026**. It streamlines package allocations, calculates optimized transport routes, and provides real-time shipment visibility for logistics operations.
+
+---
+
+## 🚀 Features
+
+- **Route Optimization:** Algorithmic routing designed to minimize travel time and distance for vehicle fleets.
+- **Logistics Allocation Engine:** Automated package-to-vehicle allocation based on capacity and destination.
+- **Real-Time Tracking & Management:** Interactive dashboards to monitor fleet routes and shipment status.
+- **Modern UI/UX:** Fast, responsive, and intuitive interface built with Next.js and modern styling frameworks.
+- **Containerized Deployment:** Fully Dockerized setup for consistent development and production environments.
+
+---
+
+## 🛠️️ Tech Stack
+
+- **Frontend / Framework:** [Next.js](https://nextjs.org/) (React, TypeScript)
+- **Styling:** Tailwind CSS / UI Components
+- **Containerization:** Docker & Docker Compose
+- **Version Control:** Git & GitHub
+
+---
+
+## 📦 Installation & Setup
+
+Follow these steps to get a local copy running on your machine:
+
+### Prerequisites
+
+Ensure you have the following installed:
+- **Node.js** (v18.x or higher)
+- **npm**, **yarn**, or **pnpm**
+- **Docker** (optional, for containerized execution)
+
+---
+
+### Local Development Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone [https://github.com/Akarsha23/WayBill.git](https://github.com/Akarsha23/WayBill.git)
+   cd WayBill
