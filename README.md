@@ -34,3 +34,17 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Project Structure
+
+WayBill/
+├── public/              # Static assets and icons
+├── src/
+│   ├── app/             # Next.js App Router pages & API routes
+│   ├── components/      # Reusable UI components
+│   ├── lib/             # Utility functions and optimization logic
+│   └── types/           # TypeScript type definitions
+├── Dockerfile           # Container build configuration
+├── docker-compose.yml   # Docker multi-container setup
+├── package.json         # Project dependencies and scripts
+└── README.md            # Project documentation
