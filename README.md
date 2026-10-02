@@ -39,12 +39,21 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 
 WayBill/
 ├── public/              # Static assets and icons
+
 ├── src/
+
 │   ├── app/             # Next.js App Router pages & API routes
+
 │   ├── components/      # Reusable UI components
+
 │   ├── lib/             # Utility functions and optimization logic
+
 │   └── types/           # TypeScript type definitions
+
 ├── Dockerfile           # Container build configuration
+
 ├── docker-compose.yml   # Docker multi-container setup
+
 ├── package.json         # Project dependencies and scripts
+
 └── README.md            # Project documentation
