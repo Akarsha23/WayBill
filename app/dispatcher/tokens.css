@@ -32,12 +32,29 @@
 [data-theme="dark"] {
   --paper: #121212;
   --white: #1e1e1e;
-  --ink: #f9fafb;
+  --sunken: #27272a;
+  --g200: #2f2f33;
   --g300: #374151;
   --g400: #6b7280;
   --g600: #9ca3af;
-  --yellow: #facc15;
+  --g700: #d4d4d8;
+  --ink: #f9fafb;
   --on-yellow: #000000;
+
+  --yellow: #facc15;
+  --yellow-tint: #3f2e05;
+
+  --blue: #60a5fa;
+  --blue-text: #93c5fd;
+  --blue-tint: #15233d;
+
+  --red: #f87171;
+  --red-text: #fca5a5;
+  --red-tint: #3a1212;
+
+  --green: #4ade80;
+  --green-text: #86efac;
+  --green-tint: #0f2e1c;
 }
 
 /* Status language — shared across every role, keep identical if you add others */

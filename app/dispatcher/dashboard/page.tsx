@@ -1,224 +1,131 @@
-"use client";
 // app/dispatcher/dashboard/page.tsx
+"use client";
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { supabase } from "@/lib/supabase/client";
 import { StatusPill, Tag, Bar } from "@/components/dispatcher/ui";
-import { RouteStatus } from "@/lib/dispatcher/types";
+import { loadPlan, type PlanData } from "@/lib/dispatcher/loadPlan";
+import { vehicleSummary, BUDGET } from "@/lib/dispatcher/allocation";
+import type { RouteStatus } from "@/lib/dispatcher/types";
 
+type Kpi = "all" | "onPlan" | "deferred" | "late" | "delivered";
 type Filter = "all" | "attention" | "delivered";
 
-interface VehicleRow {
-  id: string;
-  typeLabel: string;
-  refrigerated: boolean;
-  weightCapKg: number;
-  volumeCapM3: number;
-  usedKg: number;
-  usedM3: number;
-  fuelQuotaPctLeft: number;
-  routesToday: number;
-}
-
-interface OrderRow {
-  id: string;
-  orderCode: string;
-  vehicleId: string | null;
-  status: "pending" | "assigned" | "deferred" | "delivered";
-  weightKg: number;
-  volumeM3: number;
-  outletLabel: string;
-}
+const pct = (n: number, d: number) => (d > 0 ? Math.min(100, Math.round((n / d) * 100)) : 0);
 
 export default function DashboardPage() {
-  const [vehicles, setVehicles] = useState<VehicleRow[]>([]);
-  const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [data, setData] = useState<PlanData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [depot, setDepot] = useState("all");
   const [filter, setFilter] = useState<Filter>("all");
+  const [activeKpi, setActiveKpi] = useState<Kpi>("all");
+  const [search, setSearch] = useState("");
+  const [showDeferred, setShowDeferred] = useState(false);
 
   useEffect(() => {
-    async function load() {
-      setLoading(true);
-
-      // 1. Fetch vehicles, orders, and assigned_orders simultaneously
-      const [vehRes, ordRes, assignedRes] = await Promise.all([
-        supabase.from("vehicles").select("*"),
-        supabase.from("orders").select(`
-            id,
-            order_code,
-            status,
-            weight_kg,
-            volume_m3,
-            outlets ( brand, district )
-          `),
-        supabase.from("assigned_orders").select("*"),
-      ]);
-
-      if (vehRes.error) console.error("Supabase vehicles fetch error:", vehRes.error);
-      if (ordRes.error) console.error("Supabase orders fetch error:", ordRes.error);
-      if (assignedRes.error) console.warn("Supabase assigned_orders fetch warning:", assignedRes.error);
-
-      // 2. Map assigned_orders (order_id -> vehicle_id)
-      const assignedMap = new Map<string, { vehicleId: string; status: string }>();
-      (assignedRes.data ?? []).forEach((a: any) => {
-        if (a.order_id && a.vehicle_id) {
-          assignedMap.set(String(a.order_id), {
-            vehicleId: String(a.vehicle_id),
-            status: a.status || "assigned",
-          });
-        }
-      });
-
-      // 3. Process orders and link assigned vehicle IDs
-      const loadedOrders: OrderRow[] = (ordRes.data ?? []).map((o: any) => {
-        const outlet = Array.isArray(o.outlets) ? o.outlets[0] ?? {} : o.outlets ?? {};
-        const assignment = assignedMap.get(String(o.id));
-        const mappedVehicleId = assignment?.vehicleId || null;
-        const currentStatus = assignment ? assignment.status : o.status;
-
-        return {
-          id: String(o.id),
-          orderCode: o.order_code,
-          vehicleId: mappedVehicleId,
-          status: currentStatus as OrderRow["status"],
-          weightKg: Number(o.weight_kg) || 0,
-          volumeM3: Number(o.volume_m3) || 0,
-          outletLabel: `${outlet.brand ?? "Outlet"}${outlet.district ? " · " + outlet.district : ""}`,
-        };
-      });
-
-      setOrders(loadedOrders);
-
-      // 4. Calculate vehicle load and routes dynamically from assigned orders
-      setVehicles(
-        (vehRes.data ?? []).map((v: any) => {
-          const vId = String(v.vehicle_id || v.id);
-
-          const assignedToVehicle = loadedOrders.filter(
-            (o) => o.vehicleId === vId && (o.status === "assigned" || o.status === "delivered")
-          );
-
-          const calcUsedKg = assignedToVehicle.reduce((acc, curr) => acc + curr.weightKg, 0);
-          const calcUsedM3 = assignedToVehicle.reduce((acc, curr) => acc + curr.volumeM3, 0);
-
-          return {
-            id: vId,
-            typeLabel: v.type || "Truck",
-            refrigerated: v.temp === "reefer" || v.temp === "Chilled",
-            weightCapKg: Number(v.weight_cap_kg) || 3000,
-            volumeCapM3: Number(v.volume_cap_m3) || 14,
-            usedKg: calcUsedKg > 0 ? calcUsedKg : Number(v.used_weight_kg) || 0,
-            usedM3: calcUsedM3 > 0 ? calcUsedM3 : Number(v.used_volume_m3) || 0,
-            fuelQuotaPctLeft: v.fuel_percent ?? 100,
-            routesToday: v.routes_today ?? (assignedToVehicle.length > 0 ? 1 : 0),
-          };
-        })
-      );
-
-      setLoading(false);
-    }
-    load();
+    loadPlan().then(setData).catch((e) => setError(e.message)).finally(() => setLoading(false));
   }, []);
 
-  const counts = useMemo(() => {
-    const c: Record<RouteStatus, number> = { onPlan: 0, deferred: 0, late: 0, delivered: 0 };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setShowDeferred(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const view = useMemo(() => {
+    if (!data) return null;
+    const inDepot = (d: string) => depot === "all" || d === depot;
+    const orders = data.orders.filter((o) => inDepot(o.depot));
+    const vehicles = data.vehicles.filter((v) => inDepot(v.depot));
+
+    const counts = { onPlan: 0, deferred: 0, late: 0, delivered: 0, waiting: 0 };
     orders.forEach((o) => {
-      if (o.status === "assigned") c.onPlan += 1;
-      else if (o.status === "deferred") c.deferred += 1;
-      else if (o.status === "delivered") c.delivered += 1;
+      if (o.status === "assigned") counts.onPlan++;
+      else if (o.status === "deferred") counts.deferred++;
+      else if (o.status === "late") counts.late++;
+      else if (o.status === "delivered") counts.delivered++;
+      else if (o.status === "pending") counts.waiting++;
     });
-    return c;
-  }, [orders]);
 
-  const routesByVehicle = useMemo(() => {
-    const byVehicle = new Map<string, OrderRow[]>();
+    // One row per vehicle with work on the plan.
+    const byVehicle = new Map<string, typeof orders>();
     orders
-      .filter((o) => (o.status === "assigned" || o.status === "delivered") && o.vehicleId)
-      .forEach((o) => {
-        const list = byVehicle.get(o.vehicleId!) ?? [];
-        list.push(o);
-        byVehicle.set(o.vehicleId!, list);
-      });
+      .filter((o) => o.vehicleId && ["assigned", "delivered", "late"].includes(o.status))
+      .forEach((o) => byVehicle.set(o.vehicleId!, [...(byVehicle.get(o.vehicleId!) ?? []), o]));
 
-    return Array.from(byVehicle.entries()).map(([vehicleId, vOrders]) => {
-      const vehicle = vehicles.find((v) => v.id === vehicleId);
-      const isDelivered = vOrders.every((o) => o.status === "delivered");
-
+    const routes = [...byVehicle.entries()].map(([vehicleId, list]) => {
+      list.sort((a, b) => (a.tripId ?? 0) - (b.tripId ?? 0) || a.seq - b.seq);
+      const status: RouteStatus = list.some((o) => o.status === "late") ? "late" : list.every((o) => o.status === "delivered") ? "delivered" : "onPlan";
+      const next = list.find((o) => o.status !== "delivered");
+      const v = vehicles.find((x) => x.id === vehicleId);
       return {
-        vehicleId,
-        vehicleType: vehicle?.typeLabel ?? "Vehicle",
-        stopsCount: vOrders.length,
-        nextStop: vOrders[0]?.outletLabel ?? "—",
-        status: (isDelivered ? "delivered" : "onPlan") as RouteStatus,
+        vehicleId, status, stops: list.length,
+        type: v ? `${v.type}${v.reefer ? " · reefer" : ""}` : "Vehicle",
+        nextStop: next ? `${next.outletLabel}${next.eta ? ` · ETA ${next.eta}` : ""}` : "—",
       };
     });
-  }, [orders, vehicles]);
 
-  const deferredOrders = orders.filter((o) => o.status === "deferred");
+    return { orders, vehicles, counts, routes, deferred: orders.filter((o) => o.status === "deferred") };
+  }, [data, depot]);
 
-  const visibleRows = routesByVehicle.filter((r) => {
-    if (filter === "all") return true;
-    if (filter === "attention") return r.status === "late" || r.status === "deferred";
+  if (loading) return <div style={{ color: "var(--g600)", fontSize: 14 }}>Loading dispatch data…</div>;
+  if (error || !data || !view) return <p role="alert" style={{ color: "var(--red-text)" }}>Could not load dispatch data: {error}</p>;
+
+  const rows = view.routes.filter((r) => {
+    if (activeKpi !== "all" && r.status !== activeKpi) return false;
+    if (filter === "attention") return r.status === "late";
     if (filter === "delivered") return r.status === "delivered";
     return true;
   });
+  const q = search.toLowerCase().trim();
+  const fleet = view.vehicles.filter((v) => !q || v.id.toLowerCase().includes(q) || v.type.includes(q) || v.depot.toLowerCase().includes(q));
 
-  if (loading) {
-    return <div style={{ color: "var(--g600)", fontSize: 14 }}>Loading dispatch data…</div>;
-  }
+  const onKpi = (k: Kpi) => {
+    if (k === "deferred") setShowDeferred(true);
+    else setActiveKpi((prev) => (prev === k ? "all" : k));
+  };
 
   return (
     <div>
-      <h1 style={{ fontSize: 32, fontWeight: 900, letterSpacing: "-0.03em", margin: "0 0 6px" }}>
-        Today&rsquo;s dispatch
-      </h1>
-      <p style={{ color: "var(--g600)", marginBottom: 16 }}>Peliyagoda depot · Waypoint Fresh</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+        <div>
+          <h1 style={{ fontSize: 32, fontWeight: 900, letterSpacing: "-0.03em", margin: "0 0 6px" }}>Today&rsquo;s dispatch</h1>
+          <p style={{ color: "var(--g600)", margin: 0 }}>{depot === "all" ? "All depots" : `${depot} depot`}</p>
+        </div>
+        <select aria-label="Depot" value={depot} onChange={(e) => setDepot(e.target.value)} style={{ minHeight: 40, padding: "6px 10px", borderRadius: 8, border: "1px solid var(--g300)", background: "var(--white)", color: "var(--ink)" }}>
+          <option value="all">All depots</option>
+          <option>Peliyagoda</option>
+          <option>Kandy</option>
+        </select>
+      </div>
 
-      {deferredOrders.length > 0 && (
-        <div
-          style={{
-            background: "var(--yellow)",
-            color: "var(--on-yellow)",
-            border: "1px solid var(--on-yellow)",
-            borderRadius: 12,
-            padding: "12px 16px",
-            marginBottom: 16,
-            fontSize: 14,
-          }}
-        >
-          <b>{deferredOrders.length} order(s) deferred</b> — a reason is required before close.{" "}
-          <Link href="/dispatcher/plan" style={{ textDecoration: "underline", fontWeight: 700 }}>
-            Review
-          </Link>
+      {view.deferred.length > 0 && (
+        <div style={{ background: "var(--yellow)", color: "var(--on-yellow)", border: "1px solid var(--on-yellow)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div><b>{view.deferred.length} order{view.deferred.length > 1 ? "s" : ""} deferred</b>. The reason is recorded for each.</div>
+          <button onClick={() => setShowDeferred(true)} style={{ background: "var(--on-yellow)", color: "var(--yellow)", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
+            View deferred orders
+          </button>
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
-        <Kpi label="On plan" value={counts.onPlan} color="var(--blue-text)" />
-        <Kpi label="Deferred" value={counts.deferred} />
-        <Kpi label="Late" value={counts.late} color="var(--red-text)" />
-        <Kpi label="Delivered" value={counts.delivered} color="var(--g700)" />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 20 }}>
+        <KpiCard label="Waiting to plan" value={view.counts.waiting} href="/dispatcher/plan" />
+        <KpiCard label="On plan" value={view.counts.onPlan} color="var(--blue-text)" active={activeKpi === "onPlan"} onClick={() => onKpi("onPlan")} />
+        <KpiCard label="Deferred" value={view.counts.deferred} color="var(--red-text)" onClick={() => onKpi("deferred")} />
+        <KpiCard label="Late" value={view.counts.late} color="var(--red-text)" active={activeKpi === "late"} onClick={() => onKpi("late")} />
+        <KpiCard label="Delivered" value={view.counts.delivered} color="var(--green-text)" active={activeKpi === "delivered"} onClick={() => onKpi("delivered")} />
       </div>
 
-       <section className="card">
+      <section className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-          <h2 style={{ marginTop: 0 }}>Today&rsquo;s routes</h2>
-          <div style={{ display: "flex", gap: 6 }}>
+          <h2 style={{ marginTop: 0 }}>Today&rsquo;s routes{activeKpi !== "all" ? ` · ${activeKpi}` : ""}</h2>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            {activeKpi !== "all" && (
+              <button onClick={() => setActiveKpi("all")} style={chip(false)}>Clear filter ✕</button>
+            )}
             {(["all", "attention", "delivered"] as Filter[]).map((f) => (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                style={{
-                  padding: "6px 12px",
-                  borderRadius: 999,
-                  border: "1px solid var(--g300)",
-                  background: filter === f ? "var(--ink)" : "var(--white)",
-                  color: filter === f ? "var(--paper)" : "var(--g600)",
-                  fontSize: 13,
-                  cursor: "pointer",
-                }}
-              >
+              <button key={f} onClick={() => setFilter(f)} style={chip(filter === f)}>
                 {f === "all" ? "All" : f === "attention" ? "Needs attention" : "Delivered"}
               </button>
             ))}
@@ -226,88 +133,115 @@ export default function DashboardPage() {
         </div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", minWidth: 560, borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                {["Vehicle", "Status", "Next stop", "Stops assigned", ""].map((h) => (
-                  <Th key={h}>{h}</Th>
-                ))}
-              </tr>
-            </thead>
+            <thead><tr>{["Vehicle", "Status", "Next stop", "Stops", ""].map((h) => <Th key={h}>{h}</Th>)}</tr></thead>
             <tbody>
-              {visibleRows.length === 0 && (
-                <tr><Td colSpan={5}>No assigned routes found for this filter.</Td></tr>
-              )}
-              {visibleRows.map((r) => (
+              {rows.length === 0 && <tr><Td colSpan={5}>No routes match this filter. <Link href="/dispatcher/plan" style={{ textDecoration: "underline" }}>Plan orders</Link></Td></tr>}
+              {rows.map((r) => (
                 <tr key={r.vehicleId}>
-                  <Td><b>{r.vehicleId}</b><div style={{ fontSize: 13, color: "var(--g600)" }}>{r.vehicleType}</div></Td>
+                  <Td><b>{r.vehicleId}</b><div style={{ fontSize: 13, color: "var(--g600)" }}>{r.type}</div></Td>
                   <Td><StatusPill status={r.status} /></Td>
                   <Td>{r.nextStop}</Td>
-                  <Td>{r.stopsCount}</Td>
-                  <Td>
-                    <Link href={`/dispatcher/route/${r.vehicleId}`} style={{ fontSize: 13, textDecoration: "underline" }}>
-                      Open
-                    </Link>
-                  </Td>
+                  <Td>{r.stops}</Td>
+                  <Td><Link href={`/dispatcher/route/${r.vehicleId}`} style={{ fontSize: 13, textDecoration: "underline" }}>Open</Link></Td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </section>
-
       <section className="card">
-        <h2 style={{ marginTop: 0 }}>Fleet status</h2>
+        
+      </section>
+      <section className="card" style={{ marginTop: 24 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+          <h2 style={{ margin: 0 }}>Fleet status</h2>
+          <input aria-label="Search vehicles" placeholder="Search vehicle, type or depot" value={search} onChange={(e) => setSearch(e.target.value)} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid var(--g300)", fontSize: 14, width: "100%", maxWidth: 260, background: "var(--white)", color: "var(--ink)" }} />
+        </div>
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                {["Vehicle", "Type", "Load", "Fuel quota", "Routes today"].map((h) => (
-                  <Th key={h}>{h}</Th>
-                ))}
-              </tr>
-            </thead>
+          <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse" }}>
+            <thead><tr>{["Vehicle", "Type", "Busiest trip load", "Time budget", "Weekly fuel", "Trips"].map((h) => <Th key={h}>{h}</Th>)}</tr></thead>
             <tbody>
-              {vehicles.map((v) => {
-                const wtPct = v.weightCapKg ? Math.min(100, Math.round((v.usedKg / v.weightCapKg) * 100)) : 0;
-                const volPct = v.volumeCapM3 ? Math.min(100, Math.round((v.usedM3 / v.volumeCapM3) * 100)) : 0;
+              {fleet.map((v) => {
+                const s = vehicleSummary(v, data.trips, data.ctx);
+                const mine = data.trips.filter((t) => t.vehicleId === v.id);
+                const wt = Math.max(0, ...mine.map((t) => pct(t.orders.reduce((a, o) => a + o.kg, 0), v.kg)));
+                const vol = Math.max(0, ...mine.map((t) => pct(t.orders.reduce((a, o) => a + o.m3, 0), v.m3)));
+                const fuel = pct(s.fuelL, v.quotaL);
                 return (
                   <tr key={v.id}>
-                    <Td><b>{v.id}</b></Td>
-                    <Td><Tag variant={v.refrigerated ? "chill" : undefined}>{v.typeLabel}</Tag></Td>
-                    <Td><Bar pct={wtPct} /> {wtPct}% wt · {volPct}% vol</Td>
-                    <Td><Bar pct={100 - v.fuelQuotaPctLeft} warnAbove={85} /> {100 - v.fuelQuotaPctLeft}% used</Td>
-                    <Td>{v.routesToday} of 2</Td>
+                    <Td><Link href={`/dispatcher/route/${v.id}`} style={{ fontWeight: 700, color: "var(--blue-text)", textDecoration: "underline" }}>{v.id}</Link><div style={{ fontSize: 12, color: "var(--g600)" }}>{v.depot}</div></Td>
+                    <Td>
+                      <Tag variant={v.reefer ? "chill" : undefined}>{v.type}{v.reefer ? " · reefer" : ""}</Tag>
+                      {v.workshop && <Tag variant="warn">In workshop</Tag>}
+                    </Td>
+                    <Td><Bar pct={wt} /> {wt}% wt · {vol}% vol</Td>
+                    <Td>{s.freshMin}/{BUDGET.Fresh} fresh · {s.otherMin}/{BUDGET.other} other min</Td>
+                    <Td><Bar pct={fuel} warnAbove={85} /> {fuel}% of {v.quotaL} L</Td>
+                    <Td>{s.trips} of 2</Td>
                   </tr>
                 );
               })}
-              {vehicles.length === 0 && (
-                <tr><Td colSpan={5}>No vehicles found in Supabase.</Td></tr>
-              )}
             </tbody>
           </table>
         </div>
       </section>
 
-     
+      {showDeferred && (
+        <div role="dialog" aria-modal="true" aria-label="Deferred orders" onClick={() => setShowDeferred(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "var(--white)", borderRadius: 16, width: "90%", maxWidth: 760, maxHeight: "80vh", overflowY: "auto", padding: 24 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h2 style={{ margin: 0 }}>Deferred orders</h2>
+              <button aria-label="Close" onClick={() => setShowDeferred(false)} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "var(--g600)" }}>✕</button>
+            </div>
+            {view.deferred.length === 0 ? <p style={{ color: "var(--g600)" }}>No deferred orders.</p> : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+                  <thead><tr>{["Order", "Outlet", "Reason", ""].map((h) => <Th key={h}>{h}</Th>)}</tr></thead>
+                  <tbody>
+                    {view.deferred.map((o) => (
+                      <tr key={o.id}>
+                        <Td><Link href={`/dispatcher/decision-trail/${encodeURIComponent(o.code)}`} style={{ fontWeight: 700, textDecoration: "underline" }}>{o.code}</Link></Td>
+                        <Td>{o.outletLabel}</Td>
+                        <Td>{o.deferReason || "No reason recorded"}</Td>
+                        <Td><Link href={`/dispatcher/plan?order=${encodeURIComponent(o.code)}`} style={{ fontSize: 13, textDecoration: "underline" }}>Allocate</Link></Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <style>{`.card{background:var(--white);border:1px solid var(--g300);border-radius:12px;padding:16px;margin-bottom:16px}`}</style>
     </div>
   );
 }
 
-function Kpi({ label, value, color }: { label: string; value: number; color?: string }) {
-  return (
-    <div style={{ background: "var(--white)", border: "1px solid var(--g300)", borderRadius: 12, padding: 16 }}>
-      <div style={{ fontSize: 13, color: "var(--g600)", marginBottom: 6 }}>{label}</div>
+const chip = (on: boolean): React.CSSProperties => ({
+  padding: "6px 12px", borderRadius: 999, border: "1px solid var(--g300)", fontSize: 13, cursor: "pointer",
+  background: on ? "var(--ink)" : "var(--white)", color: on ? "var(--paper)" : "var(--g600)",
+});
+
+function KpiCard({ label, value, color, active, onClick, href }: { label: string; value: number; color?: string; active?: boolean; onClick?: () => void; href?: string }) {
+  const style: React.CSSProperties = {
+    display: "block", textAlign: "left", font: "inherit", width: "100%", color: "inherit", textDecoration: "none",
+    background: "var(--white)", border: active ? `2px solid ${color ?? "var(--ink)"}` : "1px solid var(--g300)",
+    borderRadius: 12, padding: 16, cursor: onClick || href ? "pointer" : "default",
+  };
+  const body = (
+    <>
+      <div style={{ fontSize: 13, color: "var(--g600)", marginBottom: 6, fontWeight: 600 }}>{label}</div>
       <div style={{ fontSize: 26, fontWeight: 900, letterSpacing: "-0.03em", color }}>{value}</div>
-    </div>
+    </>
   );
+  return href ? <Link href={href} style={style}>{body}</Link> : <button onClick={onClick} style={style}>{body}</button>;
 }
 
-function Th({ children }: { children: React.ReactNode }) {
-  return <th style={{ textAlign: "left", fontSize: 12, textTransform: "uppercase", color: "var(--g600)", padding: "8px 12px", borderBottom: "1px solid var(--g300)", whiteSpace: "nowrap" }}>{children}</th>;
-}
-
-function Td({ children, colSpan }: { children: React.ReactNode; colSpan?: number }) {
-  return <td colSpan={colSpan} style={{ padding: "11px 12px", borderBottom: "1px solid var(--g200)", fontSize: 14, verticalAlign: "top" }}>{children}</td>;
-}
+const Th = ({ children }: { children: React.ReactNode }) => (
+  <th style={{ textAlign: "left", fontSize: 12, textTransform: "uppercase", color: "var(--g600)", padding: "8px 12px", borderBottom: "1px solid var(--g300)", whiteSpace: "nowrap" }}>{children}</th>
+);
+const Td = ({ children, colSpan }: { children: React.ReactNode; colSpan?: number }) => (
+  <td colSpan={colSpan} style={{ padding: "11px 12px", borderBottom: "1px solid var(--g200)", fontSize: 14, verticalAlign: "top" }}>{children}</td>
+);

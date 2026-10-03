@@ -1,65 +1,73 @@
 // app/dispatcher/decision-trail/[orderId]/page.tsx
-import { DecisionEvent } from "@/lib/dispatcher/types";
+"use client";
 
-// In production: GET /api/orders/[orderId]/events — an append-only table
-// (order_id, actor, action, reason, timestamp). Never mutate past entries;
-// a correction is a new event, not an edit.
-const SAMPLE_TRAIL: Record<string, DecisionEvent[]> = {
-  "ORD-4021": [
-    { actor: "Store manager", time: "5:40 PM yesterday", action: "Order placed" },
-    { actor: "Store manager", time: "6:02 PM yesterday", action: "Confirmed before cutoff" },
-    {
-      actor: "Imesha Fernando",
-      time: "6:45 AM",
-      action: "Allocated to VEH014",
-      detail: "truck cannot serve van-only outlet",
-    },
-    {
-      actor: "Imesha Fernando",
-      time: "6:52 AM",
-      action: "Reassigned to VEH007 (reefer van)",
-      detail: "rule check passed",
-    },
-  ],
-};
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import { supabase } from "@/lib/supabase/client";
 
-export default function DecisionTrailPage({ params }: { params: { orderId: string } }) {
-  const events = SAMPLE_TRAIL[params.orderId] ?? [
-    { actor: "System", time: "—", action: "No recorded events for this order yet." },
-  ];
+interface TrailEvent {
+  id: string;
+  actor: string;
+  action: string;
+  detail: string | null;
+  at: string;
+}
+
+const when = (iso: string) =>
+  new Date(iso).toLocaleString("en-GB", { timeZone: "Asia/Colombo", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+
+export default function DecisionTrailPage() {
+  const p = useParams() as Record<string, string>;
+  const orderRef = decodeURIComponent(p.orderId ?? p.orderid ?? "");
+  const [events, setEvents] = useState<TrailEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!orderRef) return;
+    async function load() {
+      const { data, error: err } = await supabase
+        .from("order_events")
+        .select("id, actor, action, detail, created_at")
+        .eq("order_code", orderRef)
+        .order("created_at", { ascending: true });
+      if (err) setError(err.message);
+      else setEvents((data ?? []).map((e: any) => ({ id: String(e.id), actor: e.actor, action: e.action, detail: e.detail, at: e.created_at })));
+      setLoading(false);
+    }
+    load();
+  }, [orderRef]);
 
   return (
     <div>
-      <h1 style={{ fontSize: 32, fontWeight: 900, letterSpacing: "-0.03em", margin: "0 0 6px" }}>
-        Decision trail · {params.orderId}
-      </h1>
-      <p style={{ color: "var(--g600)", marginBottom: 16, maxWidth: 640 }}>
-        Every change to this order, with who made it and why.
-      </p>
+      <div style={{ fontSize: 13, marginBottom: 10 }}>
+        <Link href="/dispatcher/orders" style={{ textDecoration: "underline" }}>Orders</Link> / Decision trail
+      </div>
+      <h1 style={{ fontSize: 32, fontWeight: 900, letterSpacing: "-0.03em", margin: "0 0 6px" }}>Decision trail · {orderRef}</h1>
+      <p style={{ color: "var(--g600)", marginBottom: 16, maxWidth: 640 }}>Every allocation and deferral for this order, with who made it and why.</p>
 
       <div style={{ background: "var(--white)", border: "1px solid var(--g300)", borderRadius: 12, padding: 16 }}>
-        <div style={{ borderLeft: "3px solid var(--g300)", marginLeft: 6, paddingLeft: 16 }}>
-          {events.map((e, i) => (
-            <div key={i} style={{ marginBottom: 16, position: "relative", fontSize: 14 }}>
-              <span
-                style={{
-                  position: "absolute",
-                  left: -23,
-                  top: 4,
-                  width: 11,
-                  height: 11,
-                  borderRadius: "50%",
-                  background: "var(--ink)",
-                }}
-              />
-              <b>{e.action}</b>
-              <div style={{ color: "var(--g600)" }}>
-                {e.actor} · {e.time}
-                {e.detail ? ` · ${e.detail}` : ""}
+        {loading ? (
+          <p style={{ margin: 0 }}>Loading…</p>
+        ) : error ? (
+          <p role="alert" style={{ margin: 0, color: "var(--red-text)" }}>Could not load the trail: {error}</p>
+        ) : events.length === 0 ? (
+          <p style={{ margin: 0, color: "var(--g600)" }}>No decisions have been recorded for this order yet.</p>
+        ) : (
+          <div style={{ borderLeft: "3px solid var(--g300)", marginLeft: 6, paddingLeft: 16 }}>
+            {events.map((e) => (
+              <div key={e.id} style={{ marginBottom: 16, position: "relative", fontSize: 14 }}>
+                <span style={{ position: "absolute", left: -23, top: 4, width: 11, height: 11, borderRadius: "50%", background: "var(--ink)" }} />
+                <b>{e.action}</b>
+                <div style={{ color: "var(--g600)" }}>
+                  {e.actor} · {when(e.at)}
+                  {e.detail ? ` · ${e.detail}` : ""}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

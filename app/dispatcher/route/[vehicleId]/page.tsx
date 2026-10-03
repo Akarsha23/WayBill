@@ -6,252 +6,210 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
 import { StatusPill, Tag, Bar } from "@/components/dispatcher/ui";
+import { loadCtx } from "@/lib/dispatcher/loadCtx";
+import {
+  simulate, vehicleSummary, toMin, fmt, BUDGET,
+  type Brand, type Ctx, type Order, type Trip, type Vehicle,
+} from "@/lib/dispatcher/allocation";
 
-interface VehicleDetail {
-  id: string;
-  type: string;
-  refrigerated: boolean;
-  weightCapKg: number;
-  volumeCapM3: number;
-  fuelQuotaL: number;
-  fuelUsedL: number;
-  driverName?: string;
-  driverPhone?: string;
-}
-
-interface AssignedStop {
-  orderId: string;
+interface Stop {
+  order: Order;
   orderCode: string;
   outletName: string;
   district: string;
-  weightKg: number;
-  volumeM3: number;
-  status: "assigned" | "delivered" | "deferred";
-  timeWindow?: string;
+  status: string;
+  tripId: number;
+  seq: number;
+  eta: string;
+  window: string;
 }
+
+const norm = (s: unknown) => String(s ?? "").trim().toLowerCase();
+const hhmm = (t?: string | null) => (t ? String(t).slice(0, 5) : "");
+const pct = (n: number, d: number) => (d > 0 ? Math.min(100, Math.round((n / d) * 100)) : 0);
 
 export default function VehicleRoutePage() {
   const params = useParams();
-  const vehicleId = params?.vehicleId as string;
+  // Works whether the folder is [vehicleId] or [vehicleid].
+  const vehicleId = String((params as any)?.vehicleId ?? (params as any)?.vehicleid ?? "");
 
-  const [vehicle, setVehicle] = useState<VehicleDetail | null>(null);
-  const [stops, setStops] = useState<AssignedStop[]>([]);
+  const [vehicle, setVehicle] = useState<Vehicle | null>(null);
+  const [driver, setDriver] = useState({ name: "Unassigned", phone: "" });
+  const [stops, setStops] = useState<Stop[]>([]);
+  const [ctx, setCtx] = useState<Ctx>({ travel: {}, allowance: {} });
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     if (!vehicleId) return;
-
     async function fetchRouteData() {
       setLoading(true);
+      try {
+        const [vehRes, asgRes, c] = await Promise.all([
+          supabase.from("vehicles").select("*").eq("vehicle_id", vehicleId).maybeSingle(),
+          supabase.from("assigned_orders").select("*").eq("vehicle_id", vehicleId).order("trip_id").order("stop_sequence"),
+          loadCtx(),
+        ]);
+        if (vehRes.error) throw new Error(vehRes.error.message);
+        if (asgRes.error) throw new Error(asgRes.error.message);
+        setCtx(c);
 
-      // 1. Query vehicle using strictly 'vehicle_id' column
-      const [vehRes, assignedRes] = await Promise.all([
-        supabase
-          .from("vehicles")
-          .select("*")
-          .eq("vehicle_id", vehicleId)
-          .maybeSingle(),
-        supabase
-          .from("assigned_orders")
-          .select("*")
-          .eq("vehicle_id", vehicleId),
-      ]);
-
-      if (vehRes.error) {
-        console.error("Vehicles query error:", vehRes.error.message);
-      } else if (vehRes.data) {
         const v = vehRes.data;
-        setVehicle({
-          id: String(v.vehicle_id),
-          type: v.type || "Vehicle",
-          refrigerated: v.temp === "reefer" || v.temp === "Chilled",
-          weightCapKg: Number(v.weight_cap_kg) || 3000,
-          volumeCapM3: Number(v.volume_cap_m3) || 14,
-          fuelQuotaL: Number(v.fuel_quota_l || v.fuel_quota || v.max_fuel_l) || 100,
-          fuelUsedL: Number(v.fuel_used_l || v.fuel_consumed_l) || 0,
-          driverName: v.driver_name || "Unassigned",
-          driverPhone: v.driver_phone || "",
-        });
-      }
-
-      const assignedOrdersList = assignedRes.data ?? [];
-      const orderIds = assignedOrdersList.map((a: any) => String(a.order_id));
-
-      if (orderIds.length > 0) {
-        // 2. Select valid columns from 'orders'
-        const { data: ordersData, error: ordersErr } = await supabase
-          .from("orders")
-          .select(`
-            id,
-            order_code,
-            weight_kg,
-            volume_m3,
-            outlets ( brand, district )
-          `)
-          .in("id", orderIds);
-
-        if (ordersErr) {
-          console.error("Orders query error:", ordersErr.message);
+        if (v) {
+          setVehicle({
+            id: String(v.vehicle_id),
+            type: norm(v.type) === "van" ? "van" : "truck",
+            reefer: norm(v.temp) === "reefer",
+            kg: Number(v.weight_cap_kg),
+            m3: Number(v.volume_cap_m3),
+            kmPerL: Number(v.km_per_l) || 1,
+            quotaL: Number(v.weekly_fuel_quota_l),
+            usedL: Number(v.fuel_used_l) || 0,
+            depot: v.depot,
+          });
+          setDriver({ name: v.driver_name || "Unassigned", phone: v.driver_phone || "" });
         }
 
-        const assignedMap = new Map<string, string>();
-        assignedOrdersList.forEach((a: any) => {
-          assignedMap.set(String(a.order_id), a.status || "assigned");
-        });
+        const assigned = asgRes.data ?? [];
+        const ids = assigned.map((a: any) => String(a.order_id));
+        if (ids.length === 0) {
+          setStops([]);
+          return;
+        }
+        const ordRes = await supabase
+          .from("orders")
+          .select("*, outlets ( outlet_id, brand, district, depot, dock_type, mall_window, window_open_time, window_close_time )")
+          .in("id", ids);
+        if (ordRes.error) throw new Error(ordRes.error.message);
 
-        const mappedStops: AssignedStop[] = (ordersData ?? []).map((o: any) => {
-          const outlet = Array.isArray(o.outlets) ? o.outlets[0] ?? {} : o.outlets ?? {};
-          return {
-            orderId: String(o.id),
-            orderCode: o.order_code || String(o.id),
-            outletName: outlet.brand ?? "Outlet",
-            district: outlet.district ?? "",
-            weightKg: Number(o.weight_kg) || 0,
-            volumeM3: Number(o.volume_m3) || 0,
-            status: (assignedMap.get(String(o.id)) as any) || "assigned",
-            timeWindow: o.window || "Standard",
+        const byId = new Map((ordRes.data ?? []).map((o: any) => [String(o.id), o]));
+        const built: Stop[] = assigned.flatMap((a: any) => {
+          const o: any = byId.get(String(a.order_id));
+          if (!o) return [];
+          const out = Array.isArray(o.outlets) ? o.outlets[0] ?? {} : o.outlets ?? {};
+          const order: Order = {
+            id: o.order_code || String(o.id), dbId: String(o.id), outletId: String(out.outlet_id ?? ""),
+            brand: out.brand as Brand, district: out.district, depot: out.depot, dock: out.dock_type,
+            vanOnly: false, mallWindow: out.mall_window || null,
+            open: toMin(out.window_open_time), close: toMin(out.window_close_time),
+            chilled: norm(o.temp_class) === "chilled", kg: Number(o.weight_kg) || 0, m3: Number(o.volume_m3) || 0,
+            deferredYesterday: 0, daysSinceServed: 0, label: "",
           };
+          return [{
+            order, orderCode: order.id, outletName: out.brand ?? "Outlet", district: out.district ?? "",
+            status: a.status || "assigned", tripId: Number(a.trip_id) || 1, seq: Number(a.stop_sequence) || 0,
+            eta: a.eta_time ? hhmm(a.eta_time) : "",
+            window: out.mall_window || (out.window_open_time ? `${hhmm(out.window_open_time)}–${hhmm(out.window_close_time)}` : "—"),
+          }];
         });
-
-        setStops(mappedStops);
-      } else {
-        setStops([]);
+        setStops(built);
+      } catch (e: any) {
+        console.error(e);
+        setError(e.message ?? "Could not load route.");
+      } finally {
+        setLoading(false);
       }
-
-      setLoading(false);
     }
-
     fetchRouteData();
   }, [vehicleId]);
 
-  if (loading) {
-    return (
-      <div style={{ padding: "20px 0", color: "var(--g600)", fontSize: 14 }}>
-        Loading route details for vehicle {vehicleId}…
-      </div>
-    );
-  }
+  if (loading) return <div style={{ padding: "20px 0", color: "var(--g600)", fontSize: 14 }}>Loading route details for vehicle {vehicleId}…</div>;
+  if (error) return <p role="alert" style={{ color: "var(--red-text)" }}>Could not load route: {error}</p>;
+  if (!vehicle) return <p style={{ color: "var(--g600)" }}>Vehicle {vehicleId} was not found.</p>;
 
-  const totalKg = stops.reduce((acc, curr) => acc + curr.weightKg, 0);
-  const totalM3 = stops.reduce((acc, curr) => acc + curr.volumeM3, 0);
-  const wtPct = vehicle?.weightCapKg ? Math.min(100, Math.round((totalKg / vehicle.weightCapKg) * 100)) : 0;
-  const volPct = vehicle?.volumeCapM3 ? Math.min(100, Math.round((totalM3 / vehicle.volumeCapM3) * 100)) : 0;
-  
-  const fuelUsed = vehicle?.fuelUsedL || 0;
-  const fuelQuota = vehicle?.fuelQuotaL || 100;
-  const fuelPct = fuelQuota ? Math.min(100, Math.round((fuelUsed / fuelQuota) * 100)) : 0;
+  // Capacity and time are per trip; fuel and time budgets are per vehicle.
+  const trips: Trip[] = [1, 2].flatMap((n) => {
+    const s = stops.filter((x) => x.tripId === n).sort((a, b) => a.seq - b.seq);
+    return s.length ? [{ vehicleId, tripId: n as 1 | 2, brand: s[0].order.brand, district: s[0].order.district, orders: s.map((x) => x.order) }] : [];
+  });
+  const sum = vehicleSummary(vehicle, trips, ctx);
+  const fuelPct = pct(sum.fuelL, vehicle.quotaL);
+
+  const metric = (label: string, value: string, bar?: number, sub?: string) => (
+    <div>
+      <div style={{ fontSize: 12, color: "var(--g600)", textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{value}</div>
+      {bar !== undefined && <Bar pct={bar} />}
+      {sub && <div style={{ fontSize: 12, color: "var(--g600)", marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
 
   return (
     <div style={{ maxWidth: 1000, margin: "0 auto" }}>
-      {/* Navigation Header */}
       <div style={{ marginBottom: 20 }}>
-        <Link
-          href="/dispatcher/dashboard"
-          style={{ fontSize: 13, textDecoration: "underline", color: "var(--g600)" }}
-        >
+        <Link href="/dispatcher/dashboard" style={{ fontSize: 13, textDecoration: "underline", color: "var(--g600)" }}>
           &larr; Back to dashboard
         </Link>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
-          <h1 style={{ fontSize: 32, fontWeight: 900, letterSpacing: "-0.03em", margin: 0 }}>
-            Route: {vehicleId}
-          </h1>
-          {vehicle?.refrigerated && <Tag variant="chill">Refrigerated</Tag>}
+          <h1 style={{ fontSize: 32, fontWeight: 900, letterSpacing: "-0.03em", margin: 0 }}>Route: {vehicleId}</h1>
+          {vehicle.reefer && <Tag variant="chill">Refrigerated</Tag>}
         </div>
         <p style={{ color: "var(--g600)", margin: "4px 0 0" }}>
-          Type: {vehicle?.type ?? "Vehicle"} &middot; Driver: {vehicle?.driverName}
-          {vehicle?.driverPhone ? ` (${vehicle.driverPhone})` : ""}
+          {vehicle.type} &middot; {vehicle.depot} &middot; Driver: {driver.name}
+          {driver.phone ? ` (${driver.phone})` : ""}
         </p>
       </div>
 
-      {/* Vehicle Capacity and Metrics Card */}
-      <div
-        style={{
-          background: "var(--white)",
-          border: "1px solid var(--g300)",
-          borderRadius: 12,
-          padding: 16,
-          marginBottom: 20,
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr 1fr 1fr",
-          gap: 16,
-        }}
-      >
-        <div>
-          <div style={{ fontSize: 12, color: "var(--g600)", textTransform: "uppercase" }}>Total Weight</div>
-          <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{totalKg} kg</div>
-          <Bar pct={wtPct} />
-          <div style={{ fontSize: 12, color: "var(--g600)", marginTop: 2 }}>{wtPct}% of cap</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 12, color: "var(--g600)", textTransform: "uppercase" }}>Total Volume</div>
-          <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{totalM3} m³</div>
-          <Bar pct={volPct} />
-          <div style={{ fontSize: 12, color: "var(--g600)", marginTop: 2 }}>{volPct}% of cap</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 12, color: "var(--g600)", textTransform: "uppercase" }}>Fuel Quota</div>
-          <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{fuelQuota} L</div>
-          <Bar pct={fuelPct} />
-          <div style={{ fontSize: 12, color: "var(--g600)", marginTop: 2 }}>{fuelUsed} L used ({fuelPct}%)</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 12, color: "var(--g600)", textTransform: "uppercase" }}>Stops Assigned</div>
-          <div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{stops.length}</div>
-        </div>
+      <div style={{ background: "var(--white)", border: "1px solid var(--g300)", borderRadius: 12, padding: 16, marginBottom: 20, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 16 }}>
+        {metric("Trips", `${sum.trips} of 2`)}
+        {metric("Fresh time", `${sum.freshMin} min`, pct(sum.freshMin, BUDGET.Fresh), `of ${BUDGET.Fresh} min budget`)}
+        {metric("Style / Tech time", `${sum.otherMin} min`, pct(sum.otherMin, BUDGET.other), `of ${BUDGET.other} min budget`)}
+        {metric("Weekly fuel", `${sum.fuelL.toFixed(0)} L`, fuelPct, `of ${vehicle.quotaL} L quota (${fuelPct}%)`)}
       </div>
 
-      {/* Stops Table */}
-      <section className="card">
-        <h2 style={{ marginTop: 0, marginBottom: 16, fontSize: 18 }}>Assigned Stops Sequence</h2>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", minWidth: 600, borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                {["#", "Order", "Outlet", "Window", "Weight / Volume", "Status"].map((h) => (
-                  <th
-                    key={h}
-                    style={{
-                      textAlign: "left",
-                      fontSize: 12,
-                      textTransform: "uppercase",
-                      color: "var(--g600)",
-                      padding: "8px 12px",
-                      borderBottom: "1px solid var(--g300)",
-                    }}
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {stops.length === 0 ? (
-                <tr>
-                  <td colSpan={6} style={{ padding: "16px 12px", color: "var(--g600)" }}>
-                    No orders currently assigned to vehicle {vehicleId}.
-                  </td>
-                </tr>
-              ) : (
-                stops.map((s, idx) => (
-                  <tr key={s.orderId}>
-                    <td style={tdStyle}><b>{idx + 1}</b></td>
-                    <td style={tdStyle}><b>{s.orderCode}</b></td>
-                    <td style={tdStyle}>
-                      {s.outletName}
-                      {s.district && <span style={{ color: "var(--g600)", fontSize: 13 }}> &middot; {s.district}</span>}
-                    </td>
-                    <td style={tdStyle}>{s.timeWindow}</td>
-                    <td style={tdStyle}>{s.weightKg} kg &middot; {s.volumeM3} m³</td>
-                    <td style={tdStyle}>
-                      <StatusPill status={s.status === "delivered" ? "delivered" : "onPlan"} />
-                    </td>
+      {trips.length === 0 && (
+        <section className="card">
+          <p style={{ margin: 0, color: "var(--g600)" }}>No orders currently assigned to vehicle {vehicleId}.</p>
+        </section>
+      )}
+
+      {trips.map((t) => {
+        const s = stops.filter((x) => x.tripId === t.tripId).sort((a, b) => a.seq - b.seq);
+        const kg = s.reduce((a, c) => a + c.order.kg, 0);
+        const m3 = s.reduce((a, c) => a + c.order.m3, 0);
+        const sim = simulate(t, ctx);
+        return (
+          <section className="card" key={t.tripId}>
+            <h2 style={{ marginTop: 0, marginBottom: 4, fontSize: 18 }}>
+              Trip {t.tripId} &middot; {t.brand} &middot; {t.district}
+            </h2>
+            <p style={{ margin: "0 0 12px", color: "var(--g600)", fontSize: 13 }}>
+              {sim ? `${sim.minutes} min planned` : "No travel data for this district"} &middot; {kg.toFixed(0)} of {vehicle.kg} kg &middot; {m3.toFixed(1)} of {vehicle.m3} m³
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 12 }}>
+              <div><Bar pct={pct(kg, vehicle.kg)} /><div style={{ fontSize: 12, color: "var(--g600)", marginTop: 2 }}>{pct(kg, vehicle.kg)}% of weight cap</div></div>
+              <div><Bar pct={pct(m3, vehicle.m3)} /><div style={{ fontSize: 12, color: "var(--g600)", marginTop: 2 }}>{pct(m3, vehicle.m3)}% of volume cap</div></div>
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: 640, borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    {["Stop", "Order", "Outlet", "Window", "ETA", "Weight / volume", "Status"].map((h) => (
+                      <th key={h} style={{ textAlign: "left", fontSize: 12, textTransform: "uppercase", color: "var(--g600)", padding: "8px 12px", borderBottom: "1px solid var(--g300)" }}>{h}</th>
+                    ))}
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+                </thead>
+                <tbody>
+                  {s.map((x, i) => (
+                    <tr key={x.order.dbId}>
+                      <td style={tdStyle}><b>{i + 1}</b></td>
+                      <td style={tdStyle}><b>{x.orderCode}</b></td>
+                      <td style={tdStyle}>
+                        {x.outletName}
+                        {x.district && <span style={{ color: "var(--g600)", fontSize: 13 }}> &middot; {x.district}</span>}
+                      </td>
+                      <td style={tdStyle}>{x.window}</td>
+                      <td style={tdStyle}>{x.eta || (sim ? fmt(sim.arrivals[sim.orders.findIndex((o) => o.dbId === x.order.dbId)]) : "—")}</td>
+                      <td style={tdStyle}>{x.order.kg} kg &middot; {x.order.m3} m³</td>
+                      <td style={tdStyle}><StatusPill status={x.status === "delivered" ? "delivered" : "onPlan"} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        );
+      })}
 
       <style>{`.card{background:var(--white);border:1px solid var(--g300);border-radius:12px;padding:16px;margin-bottom:16px}`}</style>
     </div>
